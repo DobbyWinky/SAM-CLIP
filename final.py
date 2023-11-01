@@ -7,25 +7,27 @@ from transformers import (
     CLIPVisionConfig, 
     CLIPVisionModel,
 )
-
 import torch
 
-import torch
+class EncSAMCLIP(torch.nn.Module):
+    def __init__(self, sam_encoder, clip_encoder, head_sam, head_clip):
+        super().__init__()
 
-class EncSAMCLIP():
-    def __init__(self):
-        pass
+        self.sam_encoder = sam_encoder
+        self.clip_encoder = clip_encoder
+        self.head_sam = head_sam
+        self.head_clip = head_clip
 
-    def fuse(self, sam_enc, clip_enc):
+    def forward(self, x):
+        sam_features = self.sam_encoder(x)
+        clip_features = self.clip_encoder.vision_projection(x.unsqueeze(1))
 
-        # Concatenate the outputs of the two image encoders.
-        output = torch.cat([self.sam_enc.SamVisionEncoderOutput, self.clip_enc.BaseModelOutput], dim=1)
+        sam_logits = self.head_sam(sam_features)
+        clip_logits = self.head_clip(clip_features)
 
-        linear_layer = torch.nn.Linear(output.shape[1], output.shape[1] // 2)
-        output = linear_layer(output)
+        features = torch.cat([sam_logits, clip_logits], dim=1)
 
-        return output
-
+        return features
 
 # SAM model
 configuration = SamConfig()
@@ -41,5 +43,17 @@ config = SamConfig(vision_config, prompt_encoder_config, mask_decoder_config)
 configuration = CLIPVisionConfig()
 clip_model = CLIPVisionModel(configuration)
 
-enc_sam_clip = EncSAMCLIP()
-fused_encoders = enc_sam_clip.fuse(sam_model.vision_encoder, clip_model.vision_model.encoder)
+head_clip = torch.nn.Linear(1024, 512)
+torch.nn.init.xavier_uniform_(head_clip.weight)
+torch.nn.init.constant_(head_clip.bias, 0.0)
+
+merged_encoder = EncSAMCLIP(sam_model.vision_encoder, clip_model.vision_model.encoder, sam_model.mask_decoder, head_clip)
+
+optimizer = torch.optim.Adam(merged_encoder.parameters(), lr=1e-4)
+loss_fn = torch.nn.MSELoss()
+
+#TODO: Image to be set properly
+logits = merged_encoder.forward("image")
+
+seg_mask_pred = logits[:, :512]
+clip_logits_pred = logits[:, 512:]
